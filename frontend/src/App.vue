@@ -43,6 +43,7 @@ const menus = [
   { path: '/restore', title: '恢复计划与校验', icon: '↺' },
   { path: '/cost', title: '成本账与分摊', icon: '¥' },
   { path: '/snapshots', title: '归档快照回放', icon: '❏' },
+  { path: '/cohort', title: '研究队列抽取', icon: '❂' },
   { path: '/projects', title: '项目审阅', icon: '⚲' }
 ]
 </script>

@@ -11,6 +11,9 @@
   6. 两路线盈亏平衡（年1次 vs 月1次）
   7. 项目退出共享对象保护
   8. 归档快照回放
+  9. 可复现研究队列抽取：患者成组不跨分区、双路线硬约束、种子复现、
+     许可失效排除、拒绝账/水位、扫描整组性、罕见协议缺口报告（不靠挪患者补覆盖）、
+     流式增量稳定性与 REVIEWER 403
 用法: python3 verify_e2e.py [base_url]
 """
 import json
@@ -245,6 +248,174 @@ kinds = {d.get("kind") for d in decisions if isinstance(d, dict)}
 check("快照可回放保留/冻结/迁移/退出等治理决定",
       {"RETENTION", "LITIGATION_HOLD", "CHECKSUM_FAILED", "PROJECT_WITHDRAWN"} <= kinds,
       str(kinds))
+
+# ---------- 11. 可复现研究队列抽取 ----------
+print("\n---- 11. 研究队列抽取（患者成组 / 双路线 / 缺口报告 / 增量） ----")
+
+# 11.0 清理历次脚本遗留的 CP-TMP 临时患者，保证 120/1600 基线可重复核验
+for p in call("GET", "/cohort/patients?q=CP-TMP", token=H):
+    call("DELETE", f"/cohort/candidates/{p['patientUid']}", token=H)
+
+ov = call("GET", "/cohort/overview", token=H)
+check("样例=120 名患者", ov["patientCount"] == 120, str(ov["patientCount"]))
+check("样例=1,600 次扫描", ov["scanCount"] == 1600, str(ov["scanCount"]))
+check("恰好 2 种设备", ov["deviceCount"] == 2, str(ov["deviceCount"]))
+check("罕见协议仅 8 名患者", ov["rarePatients"] == 8, str(ov["rarePatients"]))
+check("罕见协议合格池=7（1 人许可过期）", ov["rareEligible"] == 7, str(ov["rareEligible"]))
+check("许可过期患者=5", ov["consentExpired"] == 5, str(ov["consentExpired"]))
+check("目录 QC 排除=2", ov["catalogExcluded"] == 2, str(ov["catalogExcluded"]))
+check("许可合格患者=113", ov["eligiblePatients"] == 113, str(ov["eligiblePatients"]))
+check("输入水位含计数与 SHA",
+      ov["inputWatermark"].startswith("cohort-wm/v1:p120:s1600:")
+      and len(ov["watermark"]["catalogSha256"]) == 64, ov["inputWatermark"])
+
+# 约束编译器：默认规格无可行性预警；缺口画像必须提前预警罕见协议必不可行
+comp_ok = call("POST", "/cohort/constraints/compile",
+               {"profileCode": "DEFAULT_80_20"}, token=H)
+check("编译器：默认规格合格患者=113 且无必不可行预警",
+      comp_ok["eligiblePatients"] == 113 and not comp_ok["feasibilityWarnings"],
+      str(comp_ok["feasibilityWarnings"]))
+comp_gap = call("POST", "/cohort/constraints/compile",
+                {"profileCode": "RARE_COVERAGE_GAP"}, token=H)
+check("编译器：提前预警罕见协议硬下限必不可行",
+      any("RARE_PERF_FMRI" in w for w in comp_gap["feasibilityWarnings"]),
+      str(comp_gap["feasibilityWarnings"]))
+
+eligible_patients = call("GET", "/cohort/patients?eligibility=eligible", token=H)
+expect_assigned_scans = sum(int(p["scanCount"]) for p in eligible_patients)
+all_scans = call("GET", "/cohort/scans", token=H)
+scans_by_patient = {}
+for s in all_scans:
+    scans_by_patient[s["patientUid"]] = scans_by_patient.get(s["patientUid"], 0) + 1
+
+
+def assign_map(run):
+    return {a["patientUid"]: a["split"] for a in run["assignments"]}
+
+
+def assert_run_hard(name, run):
+    v = run["validation"]
+    check(f"{name}：校验通过（患者数/覆盖硬约束全满足）", v["passed"] is True,
+          f"gaps={v['coverageGaps']}")
+    check(f"{name}：无患者跨分区泄漏", v["patientLeakage"]["leakageFree"] is True
+          and v["patientLeakage"]["crossSplitPatientCount"] == 0)
+    check(f"{name}：扫描整组性成立", v["scanWholeness"]["allScansWholeGroup"] is True
+          and v["scanWholeness"]["splitViolationCount"] == 0
+          and v["scanWholeness"]["scanCountMismatchCount"] == 0)
+    check(f"{name}：许可范围全部合法", v["consentScope"]["consentScopeOk"] is True
+          and v["consentScope"]["violationCount"] == 0)
+    check(f"{name}：配额均在硬区间内", all(q["withinBounds"] for q in v["quota"]),
+          str([(q["split"], q["actual"], q["min"], q["max"]) for q in v["quota"]]))
+    check(f"{name}：113 名合格患者全部入组", run["assignedPatients"] == 113,
+          str(run["assignedPatients"]))
+    check(f"{name}：入组扫描数=合格患者扫描总和",
+          run["assignedScans"] == expect_assigned_scans,
+          f"{run['assignedScans']} vs {expect_assigned_scans}")
+    check(f"{name}：账本保存种子与输入水位",
+          int(run["seed"]) == 20261125 and run["inputWatermark"] == ov["inputWatermark"])
+    # Python 侧独立复核：每名入组患者库内扫描数与分配行 scanCount 一致，且只在一个分区
+    amap = assign_map(run)
+    check(f"{name}：分配映射无重复患者（结构不跨分区）",
+          len(amap) == len(run["assignments"]))
+    mismatch = [a["patientUid"] for a in run["assignments"]
+                if int(a["scanCount"]) != scans_by_patient.get(a["patientUid"], 0)]
+    check(f"{name}：逐患者扫描数与目录一致", not mismatch, str(mismatch[:5]))
+    multi = [a for a in run["assignments"] if int(a["scanCount"]) > 1]
+    check(f"{name}：存在 100+ 多扫描患者且全部整体分配", len(multi) >= 100, str(len(multi)))
+
+
+# 11.1 路线 A 全局整数分配 + 种子复现
+g1 = call("POST", "/cohort/runs",
+          {"strategy": "GLOBAL_ASSIGN", "profileCode": "DEFAULT_80_20", "seed": 20261125}, token=H)
+assert_run_hard("路线A全局", g1)
+g2 = call("POST", "/cohort/runs",
+          {"strategy": "GLOBAL_ASSIGN", "profileCode": "DEFAULT_80_20", "seed": 20261125}, token=H)
+check("路线A：相同种子分配完全可复现", assign_map(g1) == assign_map(g2))
+
+# 11.2 路线 B 流式分层 + 末轮交换修复 + 种子复现
+s1 = call("POST", "/cohort/runs",
+          {"strategy": "STREAM_STRATIFIED", "profileCode": "DEFAULT_80_20", "seed": 20261125}, token=H)
+assert_run_hard("路线B流式", s1)
+s2 = call("POST", "/cohort/runs",
+          {"strategy": "STREAM_STRATIFIED", "profileCode": "DEFAULT_80_20", "seed": 20261125}, token=H)
+check("路线B：相同种子分配完全可复现", assign_map(s1) == assign_map(s2))
+
+# 11.3 许可失效/QC 排除：拒绝账与“不得分配”
+reason_by_uid = {r["patientUid"]: r["reasonCode"] for r in g1["rejections"]}
+for uid in ["CP-013", "CP-044", "CP-061", "CP-097", "CP-115"]:
+    check(f"许可过期患者 {uid} 记 CONSENT_EXPIRED",
+          reason_by_uid.get(uid) == "CONSENT_EXPIRED", str(reason_by_uid.get(uid)))
+check("QC 不合格 CP-026/CP-083 记 QC_MOTION",
+      reason_by_uid.get("CP-026") == "QC_MOTION"
+      and reason_by_uid.get("CP-083") == "QC_MOTION")
+g_assigned = assign_map(g1)
+check("全部被拒绝患者均不在分配中",
+      all(uid not in g_assigned for uid in reason_by_uid),
+      str([u for u in reason_by_uid if u in g_assigned]))
+
+# 11.4 罕见协议覆盖不足：报告缺口，而不是挪患者/拆扫描造成泄漏
+for strat in ["GLOBAL_ASSIGN", "STREAM_STRATIFIED"]:
+    gr = call("POST", "/cohort/runs",
+              {"strategy": strat, "profileCode": "RARE_COVERAGE_GAP", "seed": 7}, token=H)
+    gv = gr["validation"]
+    rare_gaps = [x for x in gv["coverageGaps"] if x["value"] == "RARE_PERF_FMRI"]
+    check(f"[{strat}] 罕见协议缺口被显式报告（≥1）",
+          gr["status"] == "COVERAGE_GAP" and gv["passed"] is False
+          and bool(rare_gaps) and int(rare_gaps[0]["missing"]) >= 1, str(rare_gaps))
+    check(f"[{strat}] 缺口下仍无跨分区泄漏/扫描拆分/许可违规",
+          gv["patientLeakage"]["leakageFree"] and gv["scanWholeness"]["allScansWholeGroup"]
+          and gv["consentScope"]["consentScopeOk"])
+    gamap = assign_map(gr)
+    check(f"[{strat}] 分配行数=患者键数（无人同时落入两侧）",
+          len(gamap) == len(gr["assignments"]))
+    rare_assigned = [a for a in gr["assignments"] if "RARE_PERF_FMRI" in a["protocolFeatures"]]
+    check(f"[{strat}] 罕见协议仅动用 7 名合格患者（不越池、不挪验证集扫描）",
+          len(rare_assigned) == 7, str(len(rare_assigned)))
+    rare_cells = next(c for c in gv["coverage"] if c["value"] == "RARE_PERF_FMRI")["bySplit"]
+    check(f"[{strat}] 至少一个分区罕见协议实际数低于硬下限（缺口属实）",
+          any(not cell["hardMet"] for cell in rare_cells.values()), str(rare_cells))
+
+# 11.5 流式增量：新增患者只处理增量，无变更时分配稳定
+tmp_uid = "CP-TMP-E2E-INC"
+try:
+    call("DELETE", f"/cohort/candidates/{tmp_uid}", token=H, allow_fail=True)
+    base = call("POST", "/cohort/runs",
+                {"strategy": "STREAM_STRATIFIED", "profileCode": "DEFAULT_80_20", "seed": 555}, token=H)
+    created = call("POST", "/cohort/candidates",
+                   {"patientUid": tmp_uid, "diseaseGrade": 3, "rare": True, "scanCount": 6}, token=H)
+    check("新增 CP-TMP 候选患者成功", created.get("patientUid") == tmp_uid)
+    inc1 = call("POST", "/cohort/runs",
+                {"strategy": "STREAM_STRATIFIED", "profileCode": "DEFAULT_80_20",
+                 "seed": 555, "incrementalFromRunId": base["runId"]}, token=H)
+    check("增量轮识别 ≥1 名新患者并完成分配",
+          int(inc1["deltaPatients"]) >= 1 and tmp_uid in assign_map(inc1),
+          str(inc1.get("deltaPatients")))
+    check("增量轮仍满足全部硬约束", inc1["validation"]["passed"] is True)
+    inc2 = call("POST", "/cohort/runs",
+                {"strategy": "STREAM_STRATIFIED", "profileCode": "DEFAULT_80_20",
+                 "seed": 555, "incrementalFromRunId": inc1["runId"]}, token=H)
+    check("无目录变更时二次增量 delta=0", int(inc2["deltaPatients"]) == 0,
+          str(inc2.get("deltaPatients")))
+    check("无变更增量分配与上一账本完全一致（不抖动）",
+          assign_map(inc1) == assign_map(inc2))
+finally:
+    call("DELETE", f"/cohort/candidates/{tmp_uid}", token=H, allow_fail=True)
+
+# 11.6 账本列表/详情持久化
+runs_list = call("GET", "/cohort/runs", token=H)
+check("账本列表包含本次抽取记录", len(runs_list) >= 5 and any(r["validationPassed"] for r in runs_list))
+detail = call("GET", f"/cohort/runs/{g1['runId']}", token=H)
+check("账本详情可回放规格/编译结果/校验报告/分配",
+      detail.get("compiled") is not None and detail.get("validation") is not None
+      and len(detail.get("assignments", [])) == 113)
+
+# 11.7 REVIEWER 对抽取写操作返回 403
+rev_tok = call("POST", "/auth/login",
+               {"username": "reviewer", "password": "review123"})["token"]
+denied = call("POST", "/cohort/runs", {"strategy": "STREAM_STRATIFIED"},
+              token=rev_tok, allow_fail=True)
+check("REVIEWER 运行抽取被拒（HTTP 403）", denied.get("__http_status__") == 403,
+      str(denied.get("__http_status__")))
 
 # ---------- 汇总 ----------
 print("\n================ 验证汇总 ================")

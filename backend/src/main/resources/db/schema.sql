@@ -205,3 +205,121 @@ CREATE TABLE IF NOT EXISTS governance_event (
     affected_uids   JSONB,
     created_at      TIMESTAMP NOT NULL DEFAULT now()
 );
+
+-- ============================================================
+-- 可复现研究队列抽取（Cohort Extraction）
+-- 患者为不可拆分分组：同一患者的全部复扫必须落在同一分区
+-- ============================================================
+
+-- ---------- 队列候选患者（聚合疾病/设备/协议特征、许可、排除原因） ----------
+CREATE TABLE IF NOT EXISTS cohort_patient (
+    id                        BIGSERIAL PRIMARY KEY,
+    patient_uid               VARCHAR(32) NOT NULL UNIQUE,
+    disease_grade             INT NOT NULL CHECK (disease_grade BETWEEN 0 AND 3),
+    disease_label             VARCHAR(32) NOT NULL,
+    primary_device            VARCHAR(48) NOT NULL,
+    device_features           JSONB NOT NULL DEFAULT '[]',   -- 接触过的全部设备
+    protocol_features         JSONB NOT NULL DEFAULT '[]',   -- 出现过的全部序列/协议
+    scan_count                INT NOT NULL DEFAULT 0,
+    consent_status            VARCHAR(16) NOT NULL DEFAULT 'ACTIVE'
+                              CHECK (consent_status IN ('ACTIVE','EXPIRED','REVOKED')),
+    consent_scope             JSONB NOT NULL DEFAULT '["TRAIN","VAL"]', -- 许可可用分区范围
+    consent_expires_at        DATE,
+    catalog_exclusion_reason  VARCHAR(48),                   -- 目录标注的排除原因（QC_FAILED 等）
+    exclusion_detail          VARCHAR(256),
+    source_updated_at         TIMESTAMP NOT NULL,            -- 输入水位依据
+    created_at                TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_patient_eligible
+    ON cohort_patient(consent_status, catalog_exclusion_reason);
+
+-- ---------- 队列候选扫描（1600 次；重复/相邻复扫按 patient_uid 成组） ----------
+CREATE TABLE IF NOT EXISTS cohort_scan (
+    id                  BIGSERIAL PRIMARY KEY,
+    scan_uid            VARCHAR(40) NOT NULL UNIQUE,
+    patient_uid         VARCHAR(32) NOT NULL REFERENCES cohort_patient(patient_uid),
+    device_code         VARCHAR(48) NOT NULL,
+    protocol_code       VARCHAR(48) NOT NULL,
+    sequence_name       VARCHAR(64),
+    session_no          INT NOT NULL DEFAULT 1,
+    is_repeat_rescan    BOOLEAN NOT NULL DEFAULT false,
+    acquired_at         TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_scan_patient ON cohort_scan(patient_uid);
+CREATE INDEX IF NOT EXISTS idx_cohort_scan_protocol ON cohort_scan(protocol_code);
+
+-- ---------- 约束画像（编译器输入：患者数/类别/设备/协议覆盖的硬下限与软目标） ----------
+CREATE TABLE IF NOT EXISTS cohort_constraint_profile (
+    id            BIGSERIAL PRIMARY KEY,
+    code          VARCHAR(48) NOT NULL UNIQUE,
+    name          VARCHAR(128) NOT NULL,
+    spec_json     JSONB NOT NULL,
+    builtin       BOOLEAN NOT NULL DEFAULT true,
+    created_at    TIMESTAMP NOT NULL DEFAULT now()
+);
+
+-- ---------- 抽取账（种子、输入水位、路线、状态、统计） ----------
+CREATE TABLE IF NOT EXISTS cohort_run (
+    id                    BIGSERIAL PRIMARY KEY,
+    run_uid               VARCHAR(48) NOT NULL UNIQUE,
+    profile_code          VARCHAR(48),
+    run_name              VARCHAR(128),
+    strategy              VARCHAR(24) NOT NULL
+                          CHECK (strategy IN ('GLOBAL_ASSIGN','STREAM_STRATIFIED')),
+    seed                  BIGINT NOT NULL,                  -- 复现种子
+    spec_json             JSONB NOT NULL,                   -- 原始约束
+    compiled_json         JSONB,                            -- 编译后的硬约束/软目标
+    input_watermark       VARCHAR(160) NOT NULL,            -- 输入水位（计数+摘要）
+    watermark_json        JSONB,
+    status                VARCHAR(24) NOT NULL DEFAULT 'OK'
+                          CHECK (status IN ('OK','COVERAGE_GAP')),
+    candidate_patients    INT NOT NULL DEFAULT 0,
+    eligible_patients     INT NOT NULL DEFAULT 0,
+    rejected_patients     INT NOT NULL DEFAULT 0,
+    assigned_patients     INT NOT NULL DEFAULT 0,
+    assigned_scans        INT NOT NULL DEFAULT 0,
+    objective_score       NUMERIC(20,6),
+    solver_stats          JSONB,
+    incremental           BOOLEAN NOT NULL DEFAULT false,
+    parent_run_id         BIGINT REFERENCES cohort_run(id),
+    delta_patients        INT NOT NULL DEFAULT 0,
+    created_by            VARCHAR(64),
+    created_at            TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_run_created ON cohort_run(id DESC);
+
+-- ---------- 账本：拒绝原因（许可失效 / 目录排除等） ----------
+CREATE TABLE IF NOT EXISTS cohort_rejection (
+    id              BIGSERIAL PRIMARY KEY,
+    run_id          BIGINT NOT NULL REFERENCES cohort_run(id) ON DELETE CASCADE,
+    patient_uid     VARCHAR(32) NOT NULL,
+    reason_code     VARCHAR(48) NOT NULL,
+    detail          VARCHAR(512),
+    created_at      TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_rejection_run ON cohort_rejection(run_id);
+
+-- ---------- 患者分区分配（每名患者在每次抽取中仅一行 → 结构上不可跨分区） ----------
+CREATE TABLE IF NOT EXISTS cohort_assignment (
+    id              BIGSERIAL PRIMARY KEY,
+    run_id          BIGINT NOT NULL REFERENCES cohort_run(id) ON DELETE CASCADE,
+    patient_uid     VARCHAR(32) NOT NULL,
+    split_code      VARCHAR(16) NOT NULL,
+    scan_count      INT NOT NULL DEFAULT 0,
+    decision_path   VARCHAR(24) NOT NULL DEFAULT 'DIRECT'
+                    CHECK (decision_path IN (
+                        'DIRECT','COVERAGE_SEED','STRATIFIED','SWAP_REPAIR',
+                        'GLOBAL_INIT','GLOBAL_OPTIMIZE','INCREMENTAL')),
+    created_at      TIMESTAMP NOT NULL DEFAULT now(),
+    UNIQUE (run_id, patient_uid)
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_assignment_run_split
+    ON cohort_assignment(run_id, split_code);
+
+-- ---------- 校验报告（跨分区/配额偏差/覆盖缺口/许可范围） ----------
+CREATE TABLE IF NOT EXISTS cohort_validation (
+    run_id          BIGINT PRIMARY KEY REFERENCES cohort_run(id) ON DELETE CASCADE,
+    passed          BOOLEAN NOT NULL,
+    report_json     JSONB NOT NULL,
+    validated_at    TIMESTAMP NOT NULL DEFAULT now()
+);

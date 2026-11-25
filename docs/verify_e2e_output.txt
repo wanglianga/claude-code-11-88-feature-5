@@ -51,14 +51,71 @@
 [PASS] 项目A独占对象标记退出（RAW-IMG-A01） 
 [PASS] 研究B对象不受项目A退出影响 
 [PASS] 共享掩膜销毁检查=BLOCKED_SHARED_REFERENCE BLOCKED_SHARED_REFERENCE
-[PASS] 快照固定目录水位/依赖/费率版本 {'catalogObjects': 10, 'decisions': 20, 'rateVersion': 'RV-2026Q4', 'snapshotDate': '2026-11-25', 'snapshotId': 3, 'lineageEdges': 9, 'billingEntries': 2}
-[PASS] 快照可回放保留/冻结/迁移/退出等治理决定 {'RETENTION', 'LITIGATION_HOLD', 'LITIGATION_HOLD_RELEASED', 'CHECKSUM_FAILED', 'PROJECT_WITHDRAWN'}
+[PASS] 快照固定目录水位/依赖/费率版本 {'lineageEdges': 9, 'snapshotId': 3, 'snapshotDate': '2026-11-25', 'rateVersion': 'RV-2026Q4', 'decisions': 20, 'catalogObjects': 10, 'billingEntries': 2}
+[PASS] 快照可回放保留/冻结/迁移/退出等治理决定 {'LITIGATION_HOLD', 'PROJECT_WITHDRAWN', 'LITIGATION_HOLD_RELEASED', 'RETENTION', 'CHECKSUM_FAILED'}
+
+---- 11. 研究队列抽取（患者成组 / 双路线 / 缺口报告 / 增量） ----
+[PASS] 样例=120 名患者 120
+[PASS] 样例=1,600 次扫描 1600
+[PASS] 恰好 2 种设备 2
+[PASS] 罕见协议仅 8 名患者 8
+[PASS] 罕见协议合格池=7（1 人许可过期） 7
+[PASS] 许可过期患者=5 5
+[PASS] 目录 QC 排除=2 2
+[PASS] 许可合格患者=113 113
+[PASS] 输入水位含计数与 SHA cohort-wm/v1:p120:s1600:488088708ee7b7ae
+[PASS] 编译器：默认规格合格患者=113 且无必不可行预警 []
+[PASS] 编译器：提前预警罕见协议硬下限必不可行 ['覆盖硬约束必不可行：PROTOCOL=RARE_PERF_FMRI 各分区最低合计 8 人，但具备该特征的可抽取患者仅 7 人；将报告覆盖缺口，不会拆分患者或跨分区挪扫描。']
+[PASS] 路线A全局：校验通过（患者数/覆盖硬约束全满足） gaps=[]
+[PASS] 路线A全局：无患者跨分区泄漏 
+[PASS] 路线A全局：扫描整组性成立 
+[PASS] 路线A全局：许可范围全部合法 
+[PASS] 路线A全局：配额均在硬区间内 [('TRAIN', 90, 85, 95), ('VAL', 23, 19, 27)]
+[PASS] 路线A全局：113 名合格患者全部入组 113
+[PASS] 路线A全局：入组扫描数=合格患者扫描总和 1505 vs 1505
+[PASS] 路线A全局：账本保存种子与输入水位 
+[PASS] 路线A全局：分配映射无重复患者（结构不跨分区） 
+[PASS] 路线A全局：逐患者扫描数与目录一致 []
+[PASS] 路线A全局：存在 100+ 多扫描患者且全部整体分配 113
+[PASS] 路线A：相同种子分配完全可复现 
+[PASS] 路线B流式：校验通过（患者数/覆盖硬约束全满足） gaps=[]
+[PASS] 路线B流式：无患者跨分区泄漏 
+[PASS] 路线B流式：扫描整组性成立 
+[PASS] 路线B流式：许可范围全部合法 
+[PASS] 路线B流式：配额均在硬区间内 [('TRAIN', 90, 85, 95), ('VAL', 23, 19, 27)]
+[PASS] 路线B流式：113 名合格患者全部入组 113
+[PASS] 路线B流式：入组扫描数=合格患者扫描总和 1505 vs 1505
+[PASS] 路线B流式：账本保存种子与输入水位 
+[PASS] 路线B流式：分配映射无重复患者（结构不跨分区） 
+[PASS] 路线B流式：逐患者扫描数与目录一致 []
+[PASS] 路线B流式：存在 100+ 多扫描患者且全部整体分配 113
+[PASS] 路线B：相同种子分配完全可复现 
+[PASS] 许可过期患者 CP-013 记 CONSENT_EXPIRED CONSENT_EXPIRED
+[PASS] 许可过期患者 CP-044 记 CONSENT_EXPIRED CONSENT_EXPIRED
+[PASS] 许可过期患者 CP-061 记 CONSENT_EXPIRED CONSENT_EXPIRED
+[PASS] 许可过期患者 CP-097 记 CONSENT_EXPIRED CONSENT_EXPIRED
+[PASS] 许可过期患者 CP-115 记 CONSENT_EXPIRED CONSENT_EXPIRED
+[PASS] QC 不合格 CP-026/CP-083 记 QC_MOTION 
+[PASS] 全部被拒绝患者均不在分配中 []
+[PASS] [GLOBAL_ASSIGN] 罕见协议缺口被显式报告（≥1） [{'split': 'TRAIN', 'value': 'RARE_PERF_FMRI', 'actual': 3, 'missing': 1, 'dimension': 'PROTOCOL', 'requiredMin': 4}]
+[PASS] [GLOBAL_ASSIGN] 缺口下仍无跨分区泄漏/扫描拆分/许可违规 
+[PASS] [GLOBAL_ASSIGN] 分配行数=患者键数（无人同时落入两侧） 
+[PASS] [GLOBAL_ASSIGN] 罕见协议仅动用 7 名合格患者（不越池、不挪验证集扫描） 7
+[PASS] [GLOBAL_ASSIGN] 至少一个分区罕见协议实际数低于硬下限（缺口属实） {'VAL': {'min': 4, 'actual': 4, 'target': 4, 'hardGap': 0, 'hardMet': True, 'targetShortfall': 0}, 'TRAIN': {'min': 4, 'actual': 3, 'target': 4, 'hardGap': 1, 'hardMet': False, 'targetShortfall': 1}}
+[PASS] [STREAM_STRATIFIED] 罕见协议缺口被显式报告（≥1） [{'split': 'VAL', 'value': 'RARE_PERF_FMRI', 'actual': 3, 'missing': 1, 'dimension': 'PROTOCOL', 'requiredMin': 4}]
+[PASS] [STREAM_STRATIFIED] 缺口下仍无跨分区泄漏/扫描拆分/许可违规 
+[PASS] [STREAM_STRATIFIED] 分配行数=患者键数（无人同时落入两侧） 
+[PASS] [STREAM_STRATIFIED] 罕见协议仅动用 7 名合格患者（不越池、不挪验证集扫描） 7
+[PASS] [STREAM_STRATIFIED] 至少一个分区罕见协议实际数低于硬下限（缺口属实） {'VAL': {'min': 4, 'actual': 3, 'target': 4, 'hardGap': 1, 'hardMet': False, 'targetShortfall': 1}, 'TRAIN': {'min': 4, 'actual': 4, 'target': 4, 'hardGap': 0, 'hardMet': True, 'targetShortfall': 0}}
+[PASS] 新增 CP-TMP 候选患者成功 
+[PASS] 增量轮识别 ≥1 名新患者并完成分配 1
+[PASS] 增量轮仍满足全部硬约束 
+[PASS] 无目录变更时二次增量 delta=0 0
+[PASS] 无变更增量分配与上一账本完全一致（不抖动） 
+[PASS] 账本列表包含本次抽取记录 
+[PASS] 账本详情可回放规格/编译结果/校验报告/分配 
+[PASS] REVIEWER 运行抽取被拒（HTTP 403） 403
 
 ================ 验证汇总 ================
-通过 51 项，失败 0 项
+通过 111 项，失败 0 项
 全部场景验证通过
-
-## 补充验证（手工 curl / 构建）
-- reviewer 账号 GET /api/catalog/objects -> 200；POST /api/retention/hold -> 403（只读角色）
-- mvn test: Tests run: 8, Failures: 0, Errors: 0
-- npm run build: 99 modules transformed, built 成功
